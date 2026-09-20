@@ -52,6 +52,7 @@ main() {
       add) with_lock node_add "$DODO_SELF";;
       nodes) require_linux && node_menu;;
       routing) with_lock routing_menu;;
+      firewall) with_lock firewall_sync "$STATE";;
       logs) require_linux && journalctl -u "$SERVICE" -n 50 --no-pager;;
       restart) with_lock restart_nodes;;
       update) with_lock update_all;;

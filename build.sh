@@ -5,7 +5,7 @@ mkdir -p dist
 file=$(mktemp dist/.bundle.XXXXXX)
 trap 'rm -f "$file"' EXIT
 printf '#!/usr/bin/env bash\n# DODO_SBOX_BUNDLE\nset -o pipefail\nDODO_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")\n' > "$file"
-for part in common config system certificates menu routing updates main; do cat "lib/$part.sh" >> "$file"; done
+for part in common config system firewall certificates menu routing updates main; do cat "lib/$part.sh" >> "$file"; done
 printf '\nif [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi\n' >> "$file"
 bash -n "$file"
 chmod 755 "$file"

@@ -87,6 +87,7 @@ recover_pending() {
         systemctl stop "$SERVICE" || return 1
         rm -f "$DATA/current"
     fi
+    firewall_sync "$STATE" || return 1
     rm -f "$DATA/pending.json"
     msg '已恢复中断操作之前的配置。'
 }
@@ -115,6 +116,7 @@ apply_state() (
         if ! systemctl restart "$SERVICE" || ! service_healthy "$candidate"; then err '新配置启动失败，恢复上一份配置。'; exit 1; fi
         systemctl enable "$SERVICE" >/dev/null || exit 1
     fi
+    if ! firewall_sync "$candidate"; then err '端口规则应用失败，恢复上一份节点配置和端口规则。'; exit 1; fi
     if [[ -n $old ]]; then ln -sfn "$old" "$DATA/previous" || exit 1; fi
     rm -f "$DATA/pending.json" || exit 1
     switched=0
@@ -177,7 +179,7 @@ bbr_restore() {
 show_status() {
     if [[ -f $STATE ]]; then jq -r '.nodes[]|[.id,.name,.type,(.port|tostring),(if .enabled then "启用" else "停用" end)]|@tsv' "$STATE"; else msg '尚无节点。'; fi
     systemctl --no-pager --full status "$SERVICE" || true
-    msg '防火墙/安全组提示：只需允许节点对应端口（Reality/AnyTLS TCP，Hysteria2 UDP）。本脚本不关闭或清空已有防火墙。'
+    msg '节点变更时自动同步 UFW/firewalld 端口规则；云安全组需在服务商控制台放行对应端口。'
 }
 uninstall() {
     owned_root || return 1
@@ -187,6 +189,7 @@ uninstall() {
     auto_update_off || return 1
     systemctl disable --now "$SERVICE" dodo-sbox-renew.timer 2>/dev/null || true
     if systemctl is-active --quiet "$SERVICE" || systemctl is-active --quiet dodo-sbox-renew.service; then err '服务仍在运行，停止卸载。'; return 1; fi
+    firewall_clear || { err '端口规则清理失败，保留数据以便重试卸载。'; return 1; }
     bbr_restore || return 1
     rm -f "/etc/systemd/system/$SERVICE" /etc/systemd/system/dodo-sbox-renew.service /etc/systemd/system/dodo-sbox-renew.timer
     [[ $(readlink /usr/local/sbin/dodo-sbox) != "$DODO_ROOT/manager.sh" ]] || rm -f /usr/local/sbin/dodo-sbox

@@ -1,4 +1,4 @@
-DODO_VERSION=0.2.0
+DODO_VERSION=0.3.0
 CORE_VERSION=1.14.1
 DODO_ROOT=/opt/dodo-sbox
 DATA=/var/lib/dodo-sbox

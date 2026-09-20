@@ -63,6 +63,11 @@ issue_certificate() (
         else err '80 和 443 已被占用，请选择现有网站目录验证。'; exit 1; fi
         msg "自动选择证书验证方式：$mode"
     fi
+    local challenge_port=80
+    case $mode in alpn) challenge_port=443;; http|webroot) ;; *) err '未知证书验证方式。'; exit 1;; esac
+    trap 'firewall_sync "$STATE" || err "证书临时端口清理失败，请运行 dodo-sbox firewall 重试。"' EXIT
+    trap 'exit 130' INT TERM HUP
+    firewall_sync "$STATE" "$challenge_port" || exit 1
     if [[ $mode == alpn ]]; then
         [[ -z $(ss -H -ltn 'sport = :443') ]] || { err '443 端口被占用，原服务未改动。'; exit 1; }
     elif [[ $mode == http ]]; then
@@ -83,6 +88,7 @@ issue_certificate() (
     else err '未知证书验证方式。'; exit 1; fi
     ensure_acme || exit 1
     install -d -m 700 "$DODO_ROOT/acme-accounts/$domain" || exit 1
+    printf '%s\n' "$challenge_port" > "$DODO_ROOT/acme-accounts/$domain/challenge-port" || exit 1
     if [[ $mode == http || $mode == alpn ]]; then
         command -v socat >/dev/null || DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends socat || exit 1
         local challenge=--standalone
@@ -122,7 +128,7 @@ renew_certificates() {
     while IFS= read -r domain; do
         [[ -d $DODO_ROOT/acme-accounts/$domain ]] || continue
         rc=0
-        acme_call "$domain" --renew -d "$domain" --ecc > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
+        firewall_renew "$domain" > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
         if [[ $rc == 0 || $rc == 2 ]]; then
             copy_acme_cert "$domain" || failures=$((failures+1))
         else err "证书续期失败：$domain；保留原证书。"; failures=$((failures+1)); fi

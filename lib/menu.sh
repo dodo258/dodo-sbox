@@ -72,7 +72,7 @@ node_add() {
         if [[ $bbr == enable ]]; then
             if [[ $(sysctl -n net.ipv4.tcp_congestion_control) == bbr ]]; then msg 'BBR 已开启。'; else bbr_enable || msg '节点已部署；BBR 未启用，原因见上方。'; fi
         fi
-        msg "节点端口：$port；请在已有防火墙和云安全组允许对应 TCP/UDP 端口。"
+        msg "节点端口：$port；如仍无法连接，请检查服务商控制台的云安全组。"
         printf '%s' "$node" | share_uri
         msg '完整信息和二维码：主菜单 → 节点管理。'
         return 0

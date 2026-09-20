@@ -30,6 +30,11 @@ jobs:
         run: |
           bash tests/local.sh
           bash tests/updates.sh
+          bash tests/firewall.sh
+      - name: Verify real UFW in isolated network and mount namespaces
+        run: |
+          sudo apt-get install -y --no-install-recommends ufw
+          sudo env GITHUB_ACTIONS=true unshare --net --mount bash tests/firewall-live.sh
       - name: Verify bootstrap rejects tampered downloads
         run: sudo bash tests/bootstrap.sh
       - name: Verify real systemd update timer and uninstall

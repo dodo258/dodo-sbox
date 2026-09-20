@@ -2,7 +2,7 @@
 # DODO_SBOX_BUNDLE
 set -o pipefail
 DODO_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
-DODO_VERSION=0.2.0
+DODO_VERSION=0.3.0
 CORE_VERSION=1.14.1
 DODO_ROOT=/opt/dodo-sbox
 DATA=/var/lib/dodo-sbox
@@ -298,6 +298,7 @@ recover_pending() {
         systemctl stop "$SERVICE" || return 1
         rm -f "$DATA/current"
     fi
+    firewall_sync "$STATE" || return 1
     rm -f "$DATA/pending.json"
     msg '已恢复中断操作之前的配置。'
 }
@@ -326,6 +327,7 @@ apply_state() (
         if ! systemctl restart "$SERVICE" || ! service_healthy "$candidate"; then err '新配置启动失败，恢复上一份配置。'; exit 1; fi
         systemctl enable "$SERVICE" >/dev/null || exit 1
     fi
+    if ! firewall_sync "$candidate"; then err '端口规则应用失败，恢复上一份节点配置和端口规则。'; exit 1; fi
     if [[ -n $old ]]; then ln -sfn "$old" "$DATA/previous" || exit 1; fi
     rm -f "$DATA/pending.json" || exit 1
     switched=0
@@ -388,7 +390,7 @@ bbr_restore() {
 show_status() {
     if [[ -f $STATE ]]; then jq -r '.nodes[]|[.id,.name,.type,(.port|tostring),(if .enabled then "启用" else "停用" end)]|@tsv' "$STATE"; else msg '尚无节点。'; fi
     systemctl --no-pager --full status "$SERVICE" || true
-    msg '防火墙/安全组提示：只需允许节点对应端口（Reality/AnyTLS TCP，Hysteria2 UDP）。本脚本不关闭或清空已有防火墙。'
+    msg '节点变更时自动同步 UFW/firewalld 端口规则；云安全组需在服务商控制台放行对应端口。'
 }
 uninstall() {
     owned_root || return 1
@@ -398,6 +400,7 @@ uninstall() {
     auto_update_off || return 1
     systemctl disable --now "$SERVICE" dodo-sbox-renew.timer 2>/dev/null || true
     if systemctl is-active --quiet "$SERVICE" || systemctl is-active --quiet dodo-sbox-renew.service; then err '服务仍在运行，停止卸载。'; return 1; fi
+    firewall_clear || { err '端口规则清理失败，保留数据以便重试卸载。'; return 1; }
     bbr_restore || return 1
     rm -f "/etc/systemd/system/$SERVICE" /etc/systemd/system/dodo-sbox-renew.service /etc/systemd/system/dodo-sbox-renew.timer
     [[ $(readlink /usr/local/sbin/dodo-sbox) != "$DODO_ROOT/manager.sh" ]] || rm -f /usr/local/sbin/dodo-sbox
@@ -419,6 +422,154 @@ update_latest() {
     if [[ $(sha256 "$DODO_ROOT/manager.sh") == "${digest#sha256:}" ]]; then msg '已是最新发布的脚本。'; return 0; fi
     update_script "$url" "${digest#sha256:}"
 }
+# UFW application profiles distinguish our rules from existing port allows.
+# firewalld entries record only runtime/permanent ports that were absent before.
+firewall_detect() {
+    local ufw_active=0 firewalld_active=0 output
+    if command -v ufw >/dev/null; then
+        output=$(LC_ALL=C ufw status) || { err '无法读取 UFW 状态。'; return 1; }
+        [[ $output != 'Status: active'* ]] || ufw_active=1
+    fi
+    if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewalld_active=1; fi
+    if (( ufw_active && firewalld_active )); then err 'UFW 与 firewalld 同时运行，请先确认防火墙管理方式。'; return 1; fi
+    if (( ufw_active )); then printf 'ufw\n'
+    elif (( firewalld_active )); then printf 'firewalld\n'
+    else printf 'none\n'; fi
+}
+firewall_profile() {
+    printf '[dodo-sbox-%s-%s]\ntitle=dodo-sbox managed port\ndescription=Managed by dodo-sbox; do not edit\nports=%s/%s\n' "$1" "$2" "$1" "$2"
+}
+firewall_fields_valid() {
+    [[ $1 == ufw || $1 == firewalld ]] && [[ $2 =~ ^[a-zA-Z0-9_-]+$ ]] &&
+        [[ $3 == both || $3 == runtime || $3 == permanent ]] &&
+        { valid_port "$4" || [[ $4 == 80 || $4 == 443 ]]; } && [[ $5 == tcp || $5 == udp ]]
+}
+firewall_add() {
+    local backend=$1 zone=$2 scope=$3 port=$4 proto=$5 file app profile output rc
+    firewall_fields_valid "$@" || return 1
+    file=$DATA/firewall/$backend-$zone-$scope-$port-$proto
+    if [[ $backend == ufw ]]; then
+        app=dodo-sbox-$port-$proto
+        profile=/etc/ufw/applications.d/$app
+        if [[ -e $profile || -L $profile ]]; then
+            [[ ! -L $profile ]] && firewall_profile "$port" "$proto" | cmp -s - "$profile" || { err "UFW 应用文件冲突：$profile"; return 1; }
+            [[ -f $file ]] || { err "UFW 应用名已存在：$app"; return 1; }
+        else
+            firewall_profile "$port" "$proto" > "$profile" || return 1
+            chmod 644 "$profile" || return 1
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$@" > "$file" || return 1
+        # Prepend only this node's exact application rule; never reset policy.
+        LC_ALL=C ufw prepend allow in "$app" comment 'dodo-sbox managed' || return 1
+    else
+        local args=(--zone="$zone")
+        [[ $scope != permanent ]] || args+=(--permanent)
+        rc=0
+        output=$(firewall-cmd "${args[@]}" --query-port="$port/$proto" 2>&1) || rc=$?
+        if [[ $rc == 0 && $output == yes ]]; then return 0; fi
+        [[ $rc == 1 && $output == no ]] || { err "无法查询 firewalld $zone $port/${proto}：$output"; return 1; }
+        printf '%s\t%s\t%s\t%s\t%s\n' "$@" > "$file" || return 1
+        firewall-cmd "${args[@]}" --add-port="$port/$proto" || return 1
+    fi
+}
+firewall_remove() {
+    local file=$1 backend zone scope port proto app profile output rc
+    IFS=$'\t' read -r backend zone scope port proto < "$file" || return 1
+    firewall_fields_valid "$backend" "$zone" "$scope" "$port" "$proto" || { err '防火墙所有权记录异常。'; return 1; }
+    if [[ $backend == ufw ]]; then
+        app=dodo-sbox-$port-$proto
+        profile=/etc/ufw/applications.d/$app
+        if [[ -e $profile || -L $profile ]]; then
+            [[ ! -L $profile ]] && firewall_profile "$port" "$proto" | cmp -s - "$profile" || { err "UFW 应用文件已被修改，保留：$profile"; return 1; }
+        else
+            err "UFW 应用文件缺失，保留记录以便检查：$app"; return 1
+        fi
+        output=$(LC_ALL=C ufw show added) || return 1
+        if printf '%s\n' "$output" | grep -Fq "$app"; then
+            LC_ALL=C ufw --force delete allow in "$app" || return 1
+        fi
+        output=$(LC_ALL=C ufw show added) || return 1
+        if printf '%s\n' "$output" | grep -Fq "$app"; then err "仍有规则引用 $app，保留应用文件。"; return 1; fi
+        rm -f "$profile" || return 1
+    else
+        local args=(--zone="$zone")
+        [[ $scope != permanent ]] || args+=(--permanent)
+        rc=0
+        output=$(firewall-cmd "${args[@]}" --query-port="$port/$proto" 2>&1) || rc=$?
+        if [[ $rc == 0 && $output == yes ]]; then
+            firewall-cmd "${args[@]}" --remove-port="$port/$proto" || return 1
+        elif [[ $rc != 1 || $output != no ]]; then err "无法清理 firewalld $zone $port/${proto}，保留记录。"; return 1; fi
+    fi
+    rm -f "$file"
+}
+firewall_clear() {
+    local file failures=0
+    for file in "$DATA"/firewall/*; do
+        [[ -f $file ]] || continue
+        firewall_remove "$file" || failures=1
+    done
+    return "$failures"
+}
+firewall_sync() {
+    local state=${1:-} backend ports zones='' port proto zone scope file key desired failures=0
+    owned_root || return 1
+    backend=$(firewall_detect) || return 1
+    install -d -m 700 "$DATA/firewall" || return 1
+    desired=$(mktemp) || return 1
+    ports=$(mktemp) || { rm -f "$desired"; return 1; }
+    if [[ -n $state && -f $state ]]; then
+        jq -r '.nodes[]|select(.enabled)|[.port,(if .type=="hysteria2" then "udp" else "tcp" end)]|@tsv' "$state" > "$ports" || { rm -f "$ports" "$desired"; return 1; }
+    fi
+    if [[ -n ${2:-} ]]; then
+        [[ $2 == 80 || $2 == 443 ]] || { rm -f "$ports" "$desired"; return 1; }
+        printf '%s\ttcp\n' "$2" >> "$ports"
+    fi
+    if [[ $backend == firewalld ]]; then
+        zones=$(firewall-cmd --get-active-zones) || { rm -f "$ports" "$desired"; return 1; }
+        zones=$(printf '%s\n' "$zones" | awk '/^[^[:space:]]/{print $1}')
+        [[ -n $zones ]] || zones=$(firewall-cmd --get-default-zone) || { rm -f "$ports" "$desired"; return 1; }
+    fi
+    while IFS=$'\t' read -r port proto; do
+        [[ -n $port ]] || continue
+        if [[ $backend == ufw ]]; then
+            printf 'ufw-global-both-%s-%s\n' "$port" "$proto" >> "$desired"
+            firewall_add ufw global both "$port" "$proto" || { failures=1; break; }
+        elif [[ $backend == firewalld ]]; then
+            while IFS= read -r zone; do
+                for scope in runtime permanent; do
+                    printf 'firewalld-%s-%s-%s-%s\n' "$zone" "$scope" "$port" "$proto" >> "$desired"
+                    firewall_add firewalld "$zone" "$scope" "$port" "$proto" || { failures=1; break 2; }
+                done
+            done <<< "$zones"
+            (( failures == 0 )) || break
+        fi
+    done < "$ports"
+    # Cleanup is deferred if additions fail, so existing nodes retain their rules.
+    if (( failures == 0 )); then
+        for file in "$DATA"/firewall/*; do
+            [[ -f $file ]] || continue
+            key=${file##*/}
+            grep -Fxq "$key" "$desired" || firewall_remove "$file" || failures=1
+        done
+    fi
+    if [[ -s $ports ]]; then
+        if [[ $backend == none ]]; then msg '未检测到活动的 UFW/firewalld，未更改防火墙。若使用自定义 nftables/iptables，仍需检查其规则。'
+        elif (( failures == 0 )); then msg "已自动配置 $backend 节点端口；云安全组和外部连通仍需检查。"; fi
+    fi
+    rm -f "$ports" "$desired"
+    return "$failures"
+}
+firewall_renew() (
+    local domain=$1 port=80 account=$DODO_ROOT/acme-accounts/$1
+    if [[ -f $account/challenge-port ]]; then
+        read -r port < "$account/challenge-port" || exit 1
+    elif grep -q "^Le_Webroot='alpn'" "$account/${domain}_ecc/$domain.conf" 2>/dev/null; then port=443; fi
+    [[ $port == 80 || $port == 443 ]] || { err '证书验证端口记录异常。'; exit 1; }
+    trap 'firewall_sync "$STATE" || err "证书临时端口清理失败，请运行 dodo-sbox firewall 重试。"' EXIT
+    trap 'exit 130' INT TERM HUP
+    firewall_sync "$STATE" "$port" || exit 1
+    acme_call "$domain" --renew -d "$domain" --ecc
+)
 ensure_acme() {
     [[ -x $ACME ]] && return 0
     local tmp
@@ -484,6 +635,11 @@ issue_certificate() (
         else err '80 和 443 已被占用，请选择现有网站目录验证。'; exit 1; fi
         msg "自动选择证书验证方式：$mode"
     fi
+    local challenge_port=80
+    case $mode in alpn) challenge_port=443;; http|webroot) ;; *) err '未知证书验证方式。'; exit 1;; esac
+    trap 'firewall_sync "$STATE" || err "证书临时端口清理失败，请运行 dodo-sbox firewall 重试。"' EXIT
+    trap 'exit 130' INT TERM HUP
+    firewall_sync "$STATE" "$challenge_port" || exit 1
     if [[ $mode == alpn ]]; then
         [[ -z $(ss -H -ltn 'sport = :443') ]] || { err '443 端口被占用，原服务未改动。'; exit 1; }
     elif [[ $mode == http ]]; then
@@ -504,6 +660,7 @@ issue_certificate() (
     else err '未知证书验证方式。'; exit 1; fi
     ensure_acme || exit 1
     install -d -m 700 "$DODO_ROOT/acme-accounts/$domain" || exit 1
+    printf '%s\n' "$challenge_port" > "$DODO_ROOT/acme-accounts/$domain/challenge-port" || exit 1
     if [[ $mode == http || $mode == alpn ]]; then
         command -v socat >/dev/null || DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends socat || exit 1
         local challenge=--standalone
@@ -543,7 +700,7 @@ renew_certificates() {
     while IFS= read -r domain; do
         [[ -d $DODO_ROOT/acme-accounts/$domain ]] || continue
         rc=0
-        acme_call "$domain" --renew -d "$domain" --ecc > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
+        firewall_renew "$domain" > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
         if [[ $rc == 0 || $rc == 2 ]]; then
             copy_acme_cert "$domain" || failures=$((failures+1))
         else err "证书续期失败：$domain；保留原证书。"; failures=$((failures+1)); fi
@@ -624,7 +781,7 @@ node_add() {
         if [[ $bbr == enable ]]; then
             if [[ $(sysctl -n net.ipv4.tcp_congestion_control) == bbr ]]; then msg 'BBR 已开启。'; else bbr_enable || msg '节点已部署；BBR 未启用，原因见上方。'; fi
         fi
-        msg "节点端口：$port；请在已有防火墙和云安全组允许对应 TCP/UDP 端口。"
+        msg "节点端口：$port；如仍无法连接，请检查服务商控制台的云安全组。"
         printf '%s' "$node" | share_uri
         msg '完整信息和二维码：主菜单 → 节点管理。'
         return 0
@@ -902,6 +1059,7 @@ main() {
       add) with_lock node_add "$DODO_SELF";;
       nodes) require_linux && node_menu;;
       routing) with_lock routing_menu;;
+      firewall) with_lock firewall_sync "$STATE";;
       logs) require_linux && journalctl -u "$SERVICE" -n 50 --no-pager;;
       restart) with_lock restart_nodes;;
       update) with_lock update_all;;
