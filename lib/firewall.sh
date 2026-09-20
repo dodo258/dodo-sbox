@@ -68,7 +68,7 @@ firewall_remove() {
             LC_ALL=C ufw --force delete allow in "$app" || return 1
         fi
         output=$(LC_ALL=C ufw show added) || return 1
-        if printf '%s\n' "$output" | grep -Fq "$app"; then err "仍有规则引用 $app，保留应用文件。"; return 1; fi
+        if printf '%s\n' "$output" | grep -Fq "$app"; then err "仍有规则引用 ${app}，保留应用文件。"; return 1; fi
         rm -f "$profile" || return 1
     else
         local args=(--zone="$zone")
