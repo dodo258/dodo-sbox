@@ -2,7 +2,7 @@
 # DODO_SBOX_BUNDLE
 set -o pipefail
 DODO_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
-DODO_VERSION=0.1.0
+DODO_VERSION=0.2.0
 CORE_VERSION=1.14.1
 DODO_ROOT=/opt/dodo-sbox
 DATA=/var/lib/dodo-sbox
@@ -341,7 +341,8 @@ update_core() {
     local tmp old_active=0
     if [[ $("$CORE" version | head -n 1) == "sing-box version $CORE_VERSION" ]]; then msg "已是本脚本验证的核心版本 $CORE_VERSION。"; return 0; fi
     tmp=$(mktemp "$DODO_ROOT/core/.candidate.XXXXXX") || return 1
-    if ! core_download "$tmp" || ! "$tmp" check -c "$DATA/current/config.json"; then rm -f "$tmp"; return 1; fi
+    if ! core_download "$tmp"; then rm -f "$tmp"; return 1; fi
+    if [[ -f $DATA/current/config.json ]] && ! "$tmp" check -c "$DATA/current/config.json"; then rm -f "$tmp"; return 1; fi
     systemctl is-active --quiet "$SERVICE" && old_active=1
     cp -p "$CORE" "$CORE.previous" && mv -f "$tmp" "$CORE" || return 1
     if [[ $old_active == 0 ]]; then msg '核心已更新；服务保持停止状态。'; return 0; fi
@@ -391,8 +392,10 @@ show_status() {
 }
 uninstall() {
     owned_root || return 1
+    if systemctl is-active --quiet dodo-sbox-update.service; then err '自动更新正在运行，请稍后卸载。'; return 1; fi
     msg "删除本脚本服务、续期任务、$DODO_ROOT、$DATA 和快捷命令；节点凭据与本脚本证书会删除。系统依赖、其他服务和防火墙保留。"
     yesno '已导出需要的节点资料，确认卸载' || return 0
+    auto_update_off || return 1
     systemctl disable --now "$SERVICE" dodo-sbox-renew.timer 2>/dev/null || true
     if systemctl is-active --quiet "$SERVICE" || systemctl is-active --quiet dodo-sbox-renew.service; then err '服务仍在运行，停止卸载。'; return 1; fi
     bbr_restore || return 1
@@ -749,6 +752,102 @@ routing_menu() {
     rm -f "$candidate" "$tmp"
     return "$rc"
 }
+# Called under the same flock as node/configuration changes.
+update_all() {
+    owned_root || return 1
+    local before after backup
+    backup=$(mktemp "$DODO_ROOT/.update-before.XXXXXX") || return 1
+    cp -p "$DODO_ROOT/manager.sh" "$backup" || return 1
+    before=$(sha256 "$backup")
+    if ! update_latest; then rm -f "$backup"; return 1; fi
+    after=$(sha256 "$DODO_ROOT/manager.sh")
+    # Load the new script's validated core version without reacquiring our lock.
+    if bash -c 'source "$1" && update_core' bash "$DODO_ROOT/manager.sh"; then
+        rm -f "$backup"
+        msg '脚本和已验证核心已检查完成；协议实现随核心更新。'
+        return 0
+    fi
+    if [[ $before != "$after" ]]; then
+        mv -f "$backup" "$DODO_ROOT/manager.sh" || return 1
+        err '核心更新失败，管理脚本已恢复为更新前版本。'
+    else rm -f "$backup"; fi
+    return 1
+}
+update_units_owned() {
+    local unit
+    for unit in dodo-sbox-update.service dodo-sbox-update.timer; do
+        if [[ -e /etc/systemd/system/$unit ]] && ! grep -qx '# DODO_SBOX_AUTO_UPDATE' "/etc/systemd/system/$unit"; then
+            err "自动更新服务名被其他配置占用：$unit"; return 1
+        fi
+        if [[ ! -e /etc/systemd/system/$unit ]] && systemctl cat "$unit" >/dev/null 2>&1; then
+            err "自动更新服务名已存在：$unit"; return 1
+        fi
+    done
+}
+auto_update_on() {
+    owned_root && update_units_owned || return 1
+    cat > /etc/systemd/system/dodo-sbox-update.service <<'UNIT' || return 1
+# DODO_SBOX_AUTO_UPDATE
+[Unit]
+Description=Update dodo-sbox and its validated sing-box core
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/bin/bash /opt/dodo-sbox/manager.sh update
+TimeoutStartSec=15min
+UNIT
+    cat > /etc/systemd/system/dodo-sbox-update.timer <<'UNIT' || return 1
+# DODO_SBOX_AUTO_UPDATE
+[Unit]
+Description=Daily dodo-sbox update check
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=dodo-sbox-update.service
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload && systemctl enable --now dodo-sbox-update.timer || return 1
+    msg '已开启每日自动更新（服务器时间 04:00–04:30，错过后会补做）。核心更新可能短暂中断本脚本节点。'
+}
+auto_update_off() {
+    owned_root && update_units_owned || return 1
+    systemctl disable --now dodo-sbox-update.timer 2>/dev/null || true
+    # Do not interrupt an update already in progress.
+    rm -f /etc/systemd/system/dodo-sbox-update.timer /etc/systemd/system/dodo-sbox-update.service
+    systemctl daemon-reload || return 1
+    msg '自动更新已关闭；若已有更新正在运行，会完成本次操作。证书续期不受影响。'
+}
+auto_update_status() {
+    if systemctl is-enabled --quiet dodo-sbox-update.timer 2>/dev/null; then
+        msg '自动更新：已开启'
+        systemctl list-timers dodo-sbox-update.timer --no-pager
+    else msg '自动更新：未开启（可手动运行 dodo-sbox update）'; fi
+}
+update_menu() {
+    auto_update_status
+    msg $'\n1.一键更新脚本和已验证核心\n2.仅更新脚本\n3.仅更新已验证核心\n4.开启每日自动更新\n5.关闭每日自动更新\n6.回滚配置\n7.回滚脚本\n0.返回'
+    ask '请选择' || return 0
+    case $REPLY in
+      1) with_lock update_all;;
+      2) with_lock update_latest;;
+      3) with_lock update_core;;
+      4) msg '每天自动下载安装本项目发布的脚本和对应核心；重启仅影响本脚本节点。'; yesno '开启自动更新' && with_lock auto_update_on;;
+      5) with_lock auto_update_off;;
+      6) yesno '恢复上一份配置（影响本脚本节点）' && with_lock rollback_config;;
+      7) with_lock rollback_script;;
+      *) err '无效选项。';;
+    esac
+}
+restart_nodes() {
+    owned_root || return 1
+    [[ -f $STATE ]] || { err '请先部署节点。'; return 1; }
+    if [[ $(jq '[.nodes[]|select(.enabled)]|length' "$STATE") == 0 ]]; then msg '没有启用的节点。'; return 0; fi
+    "$CORE" check -c "$DATA/current/config.json" && systemctl restart "$SERVICE" && service_healthy "$STATE"
+}
 menu_header() {
     local status='未部署' counts='0 / 0' renew='未配置' routing='未启用' color='' reset=''
     if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]]; then color=$'\033[1;36m'; reset=$'\033[0m'; fi
@@ -779,19 +878,7 @@ main_menu() {
           2) node_menu;;
           3) with_lock routing_menu;;
           4) show_status; yesno '查看最近 50 行日志（分享前请检查敏感信息）' && journalctl -u "$SERVICE" -n 50 --no-pager;;
-          5)
-            msg '1.检查并更新脚本 2.更新到本脚本验证的核心版本 3.回滚配置 4.回滚脚本 5.指定脚本包更新'
-            ask '选择' 1 || continue
-            case $REPLY in
-              1) with_lock update_latest;;
-              5)
-                ask '发布包 HTTPS 地址或本地绝对路径' || continue; local source=$REPLY
-                ask '发布包 SHA256' || continue
-                with_lock update_script "$source" "$REPLY";;
-              2) with_lock update_core;;
-              3) yesno '恢复上一份配置（影响本脚本节点）' && with_lock rollback_config;;
-              4) with_lock rollback_script;;
-            esac;;
+          5) update_menu;;
           6)
             bbr_status
             msg 'BBR 为主机级 TCP 设置。共存测试请保持现状。'
@@ -812,10 +899,25 @@ main() {
       install) with_lock setup "$DODO_SELF";;
       renew) with_lock renew_certificates;;
       status) require_linux && show_status;;
+      add) with_lock node_add "$DODO_SELF";;
+      nodes) require_linux && node_menu;;
+      routing) with_lock routing_menu;;
+      logs) require_linux && journalctl -u "$SERVICE" -n 50 --no-pager;;
+      restart) with_lock restart_nodes;;
+      update) with_lock update_all;;
+      update-script) with_lock update_latest;;
+      update-core) with_lock update_core;;
+      auto-update)
+        case ${2:-status} in
+          on) with_lock auto_update_on;; off) with_lock auto_update_off;;
+          status) require_linux && auto_update_status;;
+          *) err '用法：dodo-sbox auto-update [on|off|status]'; return 1;;
+        esac;;
+      uninstall) with_lock uninstall;;
       export) [[ $EUID == 0 ]] && export_node "${2:-}" "${3:-uri}";;
       render) command -v jq >/dev/null && render_config "$2";;
       version|--version) printf 'dodo-sbox %s / tested core %s\n' "$DODO_VERSION" "$CORE_VERSION";;
-      help|--help) msg $'bash dodo-sbox [menu|install|status|renew|export NODE_ID uri|qr|details|version]\n离线验证：bash dodo-sbox render STATE.json\n首次使用：直接运行菜单选择部署。0 返回，Ctrl+C 取消。';;
+      help|--help) msg $'dodo-sbox                  打开管理菜单\ndodo-sbox add              部署节点\ndodo-sbox nodes            节点、原始链接、二维码\ndodo-sbox routing          流媒体分流\ndodo-sbox status           运行状态\ndodo-sbox logs             最近日志\ndodo-sbox restart          重启本脚本节点\ndodo-sbox update           更新脚本和已验证核心\ndodo-sbox update-script    仅更新脚本\ndodo-sbox update-core      仅更新已验证核心\ndodo-sbox auto-update on|off|status\ndodo-sbox uninstall        卸载（需要确认）\ndodo-sbox export NODE_ID uri|qr|details\n首次使用：直接运行菜单选择部署。0 返回，Ctrl+C 取消。';;
       *) err '未知命令，请使用 help。'; return 1;;
     esac
 }

@@ -130,7 +130,8 @@ update_core() {
     local tmp old_active=0
     if [[ $("$CORE" version | head -n 1) == "sing-box version $CORE_VERSION" ]]; then msg "已是本脚本验证的核心版本 $CORE_VERSION。"; return 0; fi
     tmp=$(mktemp "$DODO_ROOT/core/.candidate.XXXXXX") || return 1
-    if ! core_download "$tmp" || ! "$tmp" check -c "$DATA/current/config.json"; then rm -f "$tmp"; return 1; fi
+    if ! core_download "$tmp"; then rm -f "$tmp"; return 1; fi
+    if [[ -f $DATA/current/config.json ]] && ! "$tmp" check -c "$DATA/current/config.json"; then rm -f "$tmp"; return 1; fi
     systemctl is-active --quiet "$SERVICE" && old_active=1
     cp -p "$CORE" "$CORE.previous" && mv -f "$tmp" "$CORE" || return 1
     if [[ $old_active == 0 ]]; then msg '核心已更新；服务保持停止状态。'; return 0; fi
@@ -180,8 +181,10 @@ show_status() {
 }
 uninstall() {
     owned_root || return 1
+    if systemctl is-active --quiet dodo-sbox-update.service; then err '自动更新正在运行，请稍后卸载。'; return 1; fi
     msg "删除本脚本服务、续期任务、$DODO_ROOT、$DATA 和快捷命令；节点凭据与本脚本证书会删除。系统依赖、其他服务和防火墙保留。"
     yesno '已导出需要的节点资料，确认卸载' || return 0
+    auto_update_off || return 1
     systemctl disable --now "$SERVICE" dodo-sbox-renew.timer 2>/dev/null || true
     if systemctl is-active --quiet "$SERVICE" || systemctl is-active --quiet dodo-sbox-renew.service; then err '服务仍在运行，停止卸载。'; return 1; fi
     bbr_restore || return 1

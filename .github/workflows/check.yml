@@ -14,10 +14,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq openssl shellcheck
       - name: Check syntax, lint and reproducible bundle
         run: |
-          for file in build.sh dodo-sbox.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
+          for file in install.sh build.sh dodo-sbox.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
           bash build.sh
           git diff --exit-code -- dist/
-          shellcheck -S warning -s bash dist/dodo-sbox
+          shellcheck -S warning -s bash dist/dodo-sbox install.sh
       - name: Download checksum-pinned protocol core
         run: |
           source ./dodo-sbox.sh
@@ -25,4 +25,10 @@ jobs:
       - name: Validate configuration and real TLS proxy traffic
         env:
           TEST_CORE: ${{ runner.temp }}/sing-box
-        run: bash tests/local.sh
+        run: |
+          bash tests/local.sh
+          bash tests/updates.sh
+      - name: Verify bootstrap rejects tampered downloads
+        run: sudo bash tests/bootstrap.sh
+      - name: Verify real systemd update timer and uninstall
+        run: sudo bash tests/update-timer.sh

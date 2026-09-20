@@ -2,124 +2,77 @@
 
 [![检查](https://github.com/dodo258/dodo-sbox/actions/workflows/check.yml/badge.svg)](https://github.com/dodo258/dodo-sbox/actions/workflows/check.yml) [![版本](https://img.shields.io/github/v/release/dodo258/dodo-sbox)](https://github.com/dodo258/dodo-sbox/releases/latest)
 
-一个 Bash 脚本，一个 sing-box 服务。只部署 VLESS Reality、AnyTLS + TLS、Hysteria2；每个节点使用独立端口和凭据。
+简约的 **Shell 一键部署和管理脚本**，基于 sing-box，只保留 VLESS Reality、AnyTLS、Hysteria2。一个服务管理多个节点，每个节点使用独立端口和凭据。
 
-当前版本 `0.1.0`，首个公开测试版本，固定验证核心 `1.14.1`。已经在 Ubuntu 24.04 amd64 上完成与既有程序共存的实机测试；Linux arm64、其他系统版本仍需补充验证。已验证范围和剩余边界见 [测试记录](TEST_REPORT.md)。
+## 一键安装
 
-## 使用
-
-以 root 登录 Debian/Ubuntu 服务器后，下载发布包、校验 SHA256，再打开菜单：
+使用 **root** 登录 Debian / Ubuntu 服务器，复制下面整行命令运行：
 
 ```bash
-work=$(mktemp -d) && cd "$work" && \
-curl -fL --retry 2 -o dodo-sbox https://github.com/dodo258/dodo-sbox/releases/latest/download/dodo-sbox && \
-curl -fL --retry 2 -o SHA256SUMS https://github.com/dodo258/dodo-sbox/releases/latest/download/SHA256SUMS && \
-sha256sum -c SHA256SUMS && bash ./dodo-sbox
+bash <(curl -fsSL https://raw.githubusercontent.com/dodo258/dodo-sbox/main/install.sh)
 ```
 
-仅打开菜单不会部署节点。首次选择部署才安装缺失依赖、核心和独立服务；先阅读本页证书、防火墙和共存说明。
+没有 curl、但有 wget 时：
 
-[查看 Ubuntu 服务器上的实际菜单](docs/menu-preview.txt)。主菜单展示当前服务、启用节点数、分流规则和续期状态；节点管理支持按序号选择节点。演示时测试节点已清理，因此显示“未部署”。
-
-也可以从源码构建：
-
-```sh
-bash build.sh
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/dodo258/dodo-sbox/main/install.sh)
 ```
 
-将 `dist/dodo-sbox` 上传到 Debian/Ubuntu 服务器，以 root 运行：
+进入菜单 → 输入 **1** 部署节点 → 选择协议 → 按提示填写。可回车使用默认值，输入 **0** 返回。脚本会下载并校验发布包，首次部署自动安装缺失依赖。
 
-```sh
-bash ./dodo-sbox
+安装后，再次打开管理菜单只需：
+
+```bash
+dodo-sbox
 ```
 
-选择“部署节点”，按提示填写协议、名称、连接地址、10000–50000 内的端口、Reality 握手域名或 TLS 证书域名。端口可回车随机，自动避开已有监听和本脚本记录的端口。
+[下载安装包](https://github.com/dodo258/dodo-sbox/releases/latest) · [查看菜单](docs/menu-preview.txt)
 
-首次部署自动检测并安装必要依赖。之后运行 `dodo-sbox` 打开菜单。配置检查或服务启动失败时恢复原配置；进程中断留下的事务记录会在下次管理操作时恢复。
+## 功能与特点
 
-脚本不需要 Python，不修改系统 DNS、默认路由或原应用配置。安装使用独立目录和服务名；如果目标目录或命令属于其他应用，会拒绝覆盖。
+- **三种协议**：VLESS Reality、AnyTLS + TLS、Hysteria2。
+- **节点管理**：按序号查看节点、启停、改名、改端口、重置凭据、删除。
+- **原始链接和二维码**：导出 `vless://`、`anytls://`、`hysteria2://`；二维码本地生成，方便配合自己的客户端配置使用。
+- **免费证书**：部署时申请 Let's Encrypt，自动检查续期，无需 Cloudflare API。
+- **流媒体分流**：选定平台使用解锁 DNS 或 SOCKS5 出口，其他访问保持服务器本机出口。
+- **端口选择**：10000–50000，可指定或随机，避开已占用端口。
+- **更新与回滚**：一键更新脚本和已验证核心，可开启每日自动更新；核心启动失败恢复旧核心。
+- **独立管理**：自动补齐依赖、BBR 设置、日志、重启、卸载；保留其他应用的配置和防火墙规则。
 
-## 原始节点链接
+## 快捷管理
 
-“节点管理”统一查看节点、原始链接和本地二维码：
-
-- `vless://…`
-- `anytls://…`
-- `hysteria2://…`
-
-二维码内容就是原始链接。不会上传到第三方转换服务，也不会生成、覆盖 Surge 或 Clash 的整份配置文件。可以把链接导入自己的外置配置。凭据重置、端口修改后需重新导入。
-
-客户端必须支持所选协议；Surge 当前原生支持 AnyTLS、Hysteria2，不支持 VLESS Reality；Clash 需使用支持相应协议的 Mihomo 内核。分享链接不能为客户端添加它没有的协议能力。
-
-## 免费证书与续期
-
-使用 **Let's Encrypt** 和固定版本 `acme.sh`，不需要 Cloudflare API。
-
-- 自动模式优先使用空闲的 TCP 80（HTTP-01）；80 被占用时尝试空闲 TCP 443（TLS-ALPN-01）。验证结束后释放端口。
-- 若两个端口均被占用，选择“现有网站目录验证”。先核对验证文件实际可访问，再申请证书；不会停止 Nginx 或改写网站配置。
-- 域名 A/AAAA 必须指向能完成验证的服务器，Cloudflare 应设为“仅 DNS”。多个地址都要可验证。
-- 系统每天检查是否需要续期；只有证书满足续期条件才向 CA 续期。成功后检查域名、有效期和密钥匹配，切换证书并重启本脚本服务；失败保留原证书。重启可能短暂中断本脚本节点连接。
-- 自动续期仍需保留域名解析及相应验证端口/网站目录。以后其他服务占用了验证端口，需要调整验证方式；不会替用户停掉该服务。
-- 外部导入证书由原签发工具续期，新证书需再次导入。通配符证书不通过本脚本的 HTTP/TLS-ALPN 模式签发。
-
-查看续期状态：
-
-```sh
-systemctl list-timers dodo-sbox-renew.timer
-journalctl -u dodo-sbox-renew.service --no-pager
-```
-
-## 流媒体分流
-
-默认不启用。添加平台规则后才对指定域名生效，其余流量仍由本机直连。
-
-- **解锁 DNS**：填写解锁服务提供的 IP。普通公共 DNS 本身不提供地区解锁。
-- **代理出口**：第一版支持 SOCKS5 出口，可带用户名和密码。只有选中平台的流量走该出口；出口需要支持 UDP 才能转发 QUIC。出口不可用时不会静默回落本机。
-- 提供 Netflix、Disney+、YouTube 的基础域名组，也可完整查看、替换、自定义后缀；列表不是永远完整的解锁保证，需要按平台变化维护。
-- 同一域名同时匹配 DNS 和代理规则时，代理规则优先。
-
-**DNS 解锁边界：**客户端须把目标域名或 DNS 查询交给服务器。sing-box 1.14 的 `resolve` 不会把一个已经解析成 IP 的目标重新按 SNI 解析；ECH 或无法嗅探的流量同样不能保证域名规则命中。服务器不会改写用户的外置配置，也不会将“规则已保存”冒充“平台已解锁”。真实解锁地区还需要实际解锁 DNS/代理服务及客户端播放测试。
-
-## BBR、防火墙与更新
-
-首次节点部署可选择“内核支持时自动启用 BBR”或“保持现状”，默认共存模式保持现状。BBR 也可从主菜单单独设置；不换内核、不重启系统。系统 TCP BBR 与 Hysteria2 的用户态 QUIC 拥塞控制是两回事。
-
-保留现有防火墙规则。若防火墙或云安全组拦截节点端口，需单独允许对应端口（Reality/AnyTLS 为 TCP，Hysteria2 为 UDP）。本脚本不会停防火墙或清空规则；“服务已监听”不等于“外部端口可达”。
-
-脚本更新和核心更新分开，下载前后保留旧版本并验证校验值；核心只更新到当前脚本验证的版本。“检查并更新脚本”使用 [本仓库最新 Release](https://github.com/dodo258/dodo-sbox/releases/latest) 中命名为 `dodo-sbox` 的安装包，并验证 GitHub 提供的 SHA256 摘要。已经是相同发布包时不重复更新。也可使用指定本地/HTTPS 安装包加 SHA256 更新。
-
-更新后的脚本需退出后重新运行。配置回滚和脚本回滚分别提供；首次部署前没有上一份配置可恢复。升级前建议备份 `/opt/dodo-sbox` 与 `/var/lib/dodo-sbox`，备份包含私钥和节点凭据，应只保存在受保护的位置。
-
-## 目录与卸载
-
-| 内容 | 路径 |
+| 命令 | 功能 |
 |---|---|
-| 独立服务 | `dodo-sbox.service` |
-| 管理脚本、核心、ACME | `/opt/dodo-sbox` |
-| 节点状态、配置历史、证书 | `/var/lib/dodo-sbox` |
-| 快捷命令 | `/usr/local/sbin/dodo-sbox` |
-| 自动续期 | `dodo-sbox-renew.timer` |
+| `dodo-sbox` | 打开主菜单 |
+| `dodo-sbox add` | 部署新节点 |
+| `dodo-sbox nodes` | 节点管理、原始链接、二维码 |
+| `dodo-sbox routing` | 流媒体分流 |
+| `dodo-sbox status` | 查看运行状态 |
+| `dodo-sbox logs` | 查看最近日志 |
+| `dodo-sbox restart` | 重启本脚本节点 |
+| `dodo-sbox update` | 更新脚本和已验证核心 |
+| `dodo-sbox auto-update on` | 开启每日自动更新 |
+| `dodo-sbox auto-update off` | 关闭每日自动更新 |
+| `dodo-sbox auto-update status` | 查看自动更新状态 |
+| `dodo-sbox uninstall` | 确认后卸载 |
 
-卸载只删除本脚本的服务、目录、快捷命令和续期任务，保留共享系统依赖及其他应用。若本脚本修改过 BBR，只有当前值仍与脚本设置一致时才恢复原值。卸载前先导出所需节点资料。
+## 自动更新怎么用
 
-## 验证与来源
+菜单 **5 → 开启每日自动更新**，或者运行 `dodo-sbox auto-update on`。默认关闭，开启后每天按服务器时间 **04:00–04:30** 检查；错过后会补做。
 
-详细实测记录见 `TEST_REPORT.md`。本地验证：
+**协议实现随 sing-box 核心一起更新，无需分别更新三个协议。** 脚本先更新到本项目最新发布版，再升级到该版本验证过的核心。不会直接追随未经本项目验证的上游新版本。配置校验失败不替换核心，核心启动失败自动恢复旧核心；联合更新失败还会恢复本次替换前的管理脚本。
 
-```sh
-bash build.sh
-bash -n dist/dodo-sbox
-shellcheck -S warning -s bash dist/dodo-sbox
-TEST_CORE=/absolute/path/to/sing-box TEST_OPENSSL=/absolute/path/to/openssl bash tests/local.sh
-```
+核心更新或证书续期成功后可能短暂重启本脚本节点。证书自动续期与脚本自动更新分别运行，关闭脚本自动更新不影响续期。
 
-测试需要对应的 sing-box 二进制和 OpenSSL 3；Linux 集成测试只应在已授权、已备份的测试环境运行，需先阅读测试脚本。
+## 必要说明
 
-本项目重新实现管理逻辑，参考 mack-a/v2ray-agent 的部署流程、233boy/sing-box 的节点操作、yonggekkk/sing-box-yg 的本地链接生成。协议实现来自 sing-box，证书来自 Let's Encrypt，ACME 客户端为 acme.sh。采用 AGPL-3.0，详见 `LICENSE`。
+- **系统**：Debian / Ubuntu、systemd、amd64 / arm64；已实测 Ubuntu 24.04 amd64，其他环境的验证范围见 [测试记录](TEST_REPORT.md)。
+- **证书**：AnyTLS / Hysteria2 需域名解析到服务器；Cloudflare 设为“仅 DNS”。申请和续期需空闲 TCP 80 或 443；均被占用时可选择现有网站目录验证。导入的外部证书由原工具续期。
+- **端口**：防火墙和云安全组需允许节点端口；Reality / AnyTLS 使用 TCP，Hysteria2 使用 UDP。脚本不会自动清空或修改现有防火墙。
+- **分流**：普通公共 DNS 不等于地区解锁。DNS 分流需要客户端把目标域名或 DNS 查询交给服务器；已解析成 IP 的连接不能保证生效。实际解锁取决于服务提供方及平台。
+- **BBR**：当前内核支持时可开启，不换内核、不重启；属于主机级设置，共存环境默认保持现状。
+- **客户端**：需支持对应协议。原始链接用于导入你的外置配置，不生成整份 Surge / Clash 配置。
 
-官方参考：
+[详细说明](docs/ADVANCED.md) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/dodo258/dodo-sbox/issues)
 
-- https://sing-box.sagernet.org/configuration/
-- https://github.com/acmesh-official/acme.sh
-- https://letsencrypt.org/docs/challenge-types/
-- https://manual.nssurge.com/policies/overview.html
+参考 [233boy/sing-box](https://github.com/233boy/sing-box)、[mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent)、[yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg) 的交互和管理思路。协议核心来自 [sing-box](https://github.com/SagerNet/sing-box)，证书签发使用 [acme.sh](https://github.com/acmesh-official/acme.sh) 与 Let's Encrypt。许可：[AGPL-3.0](LICENSE)。
