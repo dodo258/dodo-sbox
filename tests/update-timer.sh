@@ -15,6 +15,22 @@ cleanup() {
     systemctl daemon-reload
 }
 trap cleanup EXIT
+# Exercise certificate activation with real Linux ownership and symlink switching.
+source ./dodo-sbox.sh
+mkdir -m 700 "$DATA/cert-test"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout "$DATA/cert-test/key.pem" -out "$DATA/cert-test/fullchain.pem" -days 2 \
+    -subj /CN=test.example.com -addext subjectAltName=DNS:test.example.com >/dev/null 2>&1
+activate_cert test.example.com "$DATA/cert-test" acme
+[[ $(certificate_source test.example.com) == acme ]]
+old_cert=$(readlink "$DATA/certs/test.example.com/active")
+activate_cert test.example.com "$DATA/cert-test" acme
+[[ $(readlink "$DATA/certs/test.example.com/active") == "$old_cert" ]]
+activate_cert test.example.com "$DATA/cert-test" import
+[[ $(certificate_source test.example.com) == import ]]
+[[ $(readlink "$DATA/certs/test.example.com/active") != "$old_cert" ]]
+[[ $(stat -c '%a' "$DATA/certs/test.example.com/active/renewal-source") == 600 ]]
+echo 'PASS atomic certificate origin switching and repeated activation'
 bash /opt/dodo-sbox/manager.sh auto-update on
 systemctl is-enabled --quiet dodo-sbox-update.timer
 systemctl is-active --quiet dodo-sbox-update.timer

@@ -20,15 +20,19 @@ cert_valid() {
     [[ -n $a && $a == "$b" ]]
 }
 activate_cert() {
-    local domain=$1 source=$2 dir gen old='' active=0
+    local domain=$1 source=$2 origin=${3:-import} dir gen old='' active=0
+    case $origin in acme|import) ;; *) return 1;; esac
     valid_domain "$domain" && cert_valid "$source/fullchain.pem" "$source/key.pem" "$domain" || { err '证书校验失败。'; return 1; }
     dir=$DATA/certs/$domain
     install -d -m 750 -o root -g dodo-sbox "$dir" || return 1
-    if [[ -f $dir/active/fullchain.pem ]] && cmp -s "$source/fullchain.pem" "$dir/active/fullchain.pem"; then return 0; fi
+    if [[ -f $dir/active/fullchain.pem && -f $dir/active/renewal-source ]] &&
+       [[ $(cat "$dir/active/renewal-source") == "$origin" ]] &&
+       cmp -s "$source/fullchain.pem" "$dir/active/fullchain.pem"; then return 0; fi
     gen=$(mktemp -d "$dir/c.XXXXXXXX") || return 1
     chmod 750 "$gen" && chgrp dodo-sbox "$gen" &&
         install -m 640 -g dodo-sbox "$source/fullchain.pem" "$gen/fullchain.pem" &&
-        install -m 640 -g dodo-sbox "$source/key.pem" "$gen/key.pem" || return 1
+        install -m 640 -g dodo-sbox "$source/key.pem" "$gen/key.pem" &&
+        printf '%s\n' "$origin" > "$gen/renewal-source" && chmod 600 "$gen/renewal-source" || return 1
     [[ ! -L $dir/active ]] || old=$(readlink "$dir/active")
     ln -s "$gen" "$dir/.next" && mv -Tf "$dir/.next" "$dir/active" || return 1
     systemctl is-active --quiet "$SERVICE" && active=1
@@ -48,7 +52,7 @@ copy_acme_cert() {
     tmp=$DODO_ROOT/acme-accounts/$domain/export
     install -d -m 700 "$tmp" || return 1
     acme_call "$domain" --install-cert -d "$domain" --ecc --key-file "$tmp/key.pem" --fullchain-file "$tmp/fullchain.pem" > "$DODO_ROOT/acme-accounts/$domain/install.log" 2>&1 &&
-        activate_cert "$domain" "$tmp" || rc=1
+        activate_cert "$domain" "$tmp" acme || rc=1
     return "$rc"
 }
 issue_certificate() (
@@ -126,12 +130,72 @@ renew_certificates() {
     [[ -f $STATE ]] || return 0
     local domain rc failures=0
     while IFS= read -r domain; do
-        [[ -d $DODO_ROOT/acme-accounts/$domain ]] || continue
+        [[ $(certificate_source "$domain") == acme ]] || continue
         rc=0
         firewall_renew "$domain" > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
         if [[ $rc == 0 || $rc == 2 ]]; then
             copy_acme_cert "$domain" || failures=$((failures+1))
-        else err "证书续期失败：$domain；保留原证书。"; failures=$((failures+1)); fi
+        else err "证书续期失败：${domain}；保留原证书。日志：$DODO_ROOT/acme-accounts/$domain/renew.log"; failures=$((failures+1)); fi
     done < <(jq -r '.nodes[]|select(.type!="vless")|.sni' "$STATE" | sort -u)
     [[ $failures == 0 ]]
+}
+certificate_source() {
+    local domain=$1 active=$DATA/certs/$1/active account=$DODO_ROOT/acme-accounts/$1 value
+    if [[ -f $active/renewal-source ]]; then
+        value=$(cat "$active/renewal-source") || return 1
+        case $value in acme|import) printf '%s\n' "$value";; *) printf 'unknown\n';; esac
+    elif [[ -f $account/${domain}_ecc/$domain.conf && -f $account/export/fullchain.pem ]] &&
+         cmp -s "$account/export/fullchain.pem" "$active/fullchain.pem"; then
+        # Legacy releases had no origin marker. An account directory alone is not proof.
+        printf 'acme\n'
+    else printf 'import\n'; fi
+}
+certificate_status() {
+    local domain cert count source health expiry issuer enabled running
+    msg $'\n证书管理（只显示本脚本节点使用的证书）\nReality 无需自行申请证书；AnyTLS / Hysteria2 使用 TLS 证书。'
+    if [[ ! -f $STATE ]] || ! jq -e 'any(.nodes[]; .type!="vless")' "$STATE" >/dev/null; then
+        msg '目前没有使用 TLS 证书的节点。'; return 0
+    fi
+    enabled=$(systemctl is-enabled dodo-sbox-renew.timer 2>/dev/null) || enabled='未启用'
+    running=$(systemctl is-active dodo-sbox-renew.timer 2>/dev/null) || running='未运行'
+    printf '自动续期定时任务：%s / %s（每日检查，仅管理本脚本签发的证书）\n' "$enabled" "$running"
+    systemctl list-timers --all dodo-sbox-renew.timer --no-pager 2>/dev/null || true
+    while IFS= read -r domain; do
+        cert=$DATA/certs/$domain/active/fullchain.pem
+        count=$(jq --arg d "$domain" '[.nodes[]|select(.type!="vless" and .sni==$d)]|length' "$STATE") || return 1
+        source=$(certificate_source "$domain") || return 1
+        case $source in
+          acme) source="Let's Encrypt 自动续期";;
+          import) source='外部导入：由原工具续期后重新导入';;
+          *) source='来源标记异常：暂不自动续期';;
+        esac
+        printf '\n域名：%s（%s 个节点共用）\n来源：%s\n' "$domain" "$count" "$source"
+        if ! expiry=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null); then
+            msg '状态：证书缺失或无法读取'; continue
+        fi
+        issuer=$(openssl x509 -in "$cert" -noout -issuer 2>/dev/null) || issuer='issuer=未知'
+        if ! openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then health='已到期'
+        elif ! openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1; then health='30 天内到期'
+        else health='有效'; fi
+        printf '到期时间：%s\n签发者：%s\n状态：%s\n' "${expiry#notAfter=}" "${issuer#issuer=}" "$health"
+    done < <(jq -r '.nodes[]|select(.type!="vless")|.sni' "$STATE" | sort -u)
+}
+certificate_renew_now() {
+    msg '检查本脚本签发的证书：达到续期条件时才申请，未到期不会强制重签。'
+    renew_certificates || return 1
+    msg '检查完成；外部导入证书不参与自动续期。'
+    certificate_status
+}
+certificate_menu() {
+    while :; do
+        certificate_status || return 1
+        [[ -f $STATE ]] || return 0
+        msg $'\n1. 刷新证书状态\n2. 立即检查续期（成功更换证书后可能短暂重启本脚本节点）\n0. 返回'
+        ask '操作' || return 0
+        case $REPLY in
+          1) ;;
+          2) with_lock certificate_renew_now || return 1;;
+          *) err '无效选项。';;
+        esac
+    done
 }

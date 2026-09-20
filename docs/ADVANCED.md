@@ -19,6 +19,8 @@
 
 ## 证书签发和续期
 
+首页 **8. 证书管理** 或 `dodo-sbox certs` 可查看本脚本 TLS 节点使用的证书；共用同一域名只显示一次。`dodo-sbox certs status` 只查询，`dodo-sbox renew` 立即检查续期。检查不会强制重签，证书到期时间和定时任务状态分别展示；定时任务正在运行不代表每次签发一定成功。
+
 自动验证优先使用空闲 TCP 80 的 HTTP-01；80 被占用时使用空闲 TCP 443 的 TLS-ALPN-01，验证后释放端口。两者都被占用时选择现有网站根目录，先验证文件可通过域名访问，再申请证书；不停止或改写现有网站。
 
 所有 A / AAAA 地址都必须能完成 CA 验证。保持域名解析、验证端口或网站目录可用；如果其他服务后来占用了验证端口，需要调整验证方式。
@@ -29,6 +31,12 @@
 systemctl list-timers dodo-sbox-renew.timer
 journalctl -u dodo-sbox-renew.service -n 50 --no-pager
 ```
+
+## Reality 握手目标
+
+新建 Reality 节点固定选择 [携程](https://www.ctrip.com/) `www.ctrip.com` 或 [西瓜视频](https://www.ixigua.com/) `www.ixigua.com`。这是 [sing-box Reality 握手目标](https://sing-box.sagernet.org/configuration/shared/tls/#reality)，与用户自己的证书域名无关。无需修改这两个网站的 DNS，也不为它们申请证书。
+
+部署会从当前服务器验证 TLS 1.3、HTTP/2、系统信任链和域名匹配。此预检不能保证网站长期不变或所有网络可达；目标失败时可重新部署并选择另一个。升级保留旧节点的 SNI、凭据和原始分享链接。
 
 ## 更新策略
 
@@ -72,6 +80,7 @@ bash build.sh
 shellcheck -S warning -s bash dist/dodo-sbox install.sh
 TEST_CORE=/absolute/path/to/sing-box TEST_OPENSSL=/absolute/path/to/openssl bash tests/local.sh
 TEST_CORE=/absolute/path/to/sing-box bash tests/updates.sh
+TEST_OPENSSL=/absolute/path/to/openssl bash tests/certificates-menu.sh
 ```
 
 `tests/bootstrap.sh` 和 `tests/update-timer.sh` 仅用于可丢弃的 Linux CI，后者会安装和卸载本脚本。不要在已有部署上直接运行。其他实机测试脚本同样需要事先阅读和备份。完整已验证范围见 [测试记录](../TEST_REPORT.md)。

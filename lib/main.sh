@@ -21,7 +21,7 @@ main_menu() {
     require_linux || return 1
     while :; do
         menu_header
-        msg $'  1. 部署节点\n  2. 节点管理 · 原始链接 / 二维码\n  3. 流媒体分流 · 解锁 DNS / 代理出口\n  4. 运行状态与日志\n  5. 更新与回滚\n  6. BBR 与系统检测\n  7. 卸载\n\n  0. 退出\n'
+        msg $'  1. 部署节点\n  2. 节点管理 · 原始链接 / 二维码\n  3. 流媒体分流 · 解锁 DNS / 代理出口\n  4. 运行状态与日志\n  5. 更新与回滚\n  6. BBR 与系统检测\n  7. 卸载\n  8. 证书管理 · 到期时间 / 自动续期\n\n  0. 退出\n'
         ask '请选择' || return 0
         case $REPLY in
           1) with_lock node_add "$DODO_SELF";;
@@ -34,6 +34,7 @@ main_menu() {
             msg 'BBR 为主机级 TCP 设置。共存测试请保持现状。'
             yesno '当前内核支持时自动开启 BBR + FQ（不更换内核、不重启）' && with_lock bbr_enable;;
           7) with_lock uninstall; [[ -f $DODO_ROOT/.dodo-owned ]] || return 0;;
+          8) certificate_menu;;
           *) err '无效选项。';;
         esac
     done
@@ -48,6 +49,12 @@ main() {
       menu) main_menu;;
       install) with_lock setup "$DODO_SELF";;
       renew) with_lock renew_certificates;;
+      certs)
+        require_linux || return 1
+        case ${2:-menu} in
+          menu) certificate_menu;; status) certificate_status;;
+          *) err '用法：dodo-sbox certs [menu|status]'; return 1;;
+        esac;;
       status) require_linux && show_status;;
       add) with_lock node_add "$DODO_SELF";;
       nodes) require_linux && node_menu;;
@@ -68,7 +75,7 @@ main() {
       export) [[ $EUID == 0 ]] && export_node "${2:-}" "${3:-uri}";;
       render) command -v jq >/dev/null && render_config "$2";;
       version|--version) printf 'dodo-sbox %s / tested core %s\n' "$DODO_VERSION" "$CORE_VERSION";;
-      help|--help) msg $'dodo-sbox                  打开管理菜单\ndodo-sbox add              部署节点\ndodo-sbox nodes            节点、原始链接、二维码\ndodo-sbox routing          流媒体分流\ndodo-sbox status           运行状态\ndodo-sbox logs             最近日志\ndodo-sbox restart          重启本脚本节点\ndodo-sbox update           更新脚本和已验证核心\ndodo-sbox update-script    仅更新脚本\ndodo-sbox update-core      仅更新已验证核心\ndodo-sbox auto-update on|off|status\ndodo-sbox uninstall        卸载（需要确认）\ndodo-sbox export NODE_ID uri|qr|details\n首次使用：直接运行菜单选择部署。0 返回，Ctrl+C 取消。';;
+      help|--help) msg $'dodo-sbox                  打开管理菜单\ndodo-sbox add              部署节点\ndodo-sbox nodes            节点、原始链接、二维码\ndodo-sbox routing          流媒体分流\ndodo-sbox certs            证书管理\ndodo-sbox certs status     证书与自动续期状态\ndodo-sbox renew            检查证书续期\ndodo-sbox firewall         同步本脚本端口规则\ndodo-sbox status           运行状态\ndodo-sbox logs             最近日志\ndodo-sbox restart          重启本脚本节点\ndodo-sbox update           更新脚本和已验证核心\ndodo-sbox update-script    仅更新脚本\ndodo-sbox update-core      仅更新已验证核心\ndodo-sbox auto-update on|off|status\ndodo-sbox uninstall        卸载（需要确认）\ndodo-sbox export NODE_ID uri|qr|details\n首次使用：直接运行菜单选择部署。0 返回，Ctrl+C 取消。';;
       *) err '未知命令，请使用 help。'; return 1;;
     esac
 }

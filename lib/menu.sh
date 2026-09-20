@@ -1,3 +1,28 @@
+reality_target_select() {
+    msg $'Reality 握手目标（无需拥有该域名或申请证书）：\n1. 携程：www.ctrip.com\n2. 西瓜视频：www.ixigua.com'
+    ask '选择目标（0 返回）' 1 || return 1
+    case $REPLY in
+      1) REPLY=www.ctrip.com;;
+      2) REPLY=www.ixigua.com;;
+      *) err '请选择 1 或 2。'; return 1;;
+    esac
+}
+reality_target_check() {
+    local domain=$1 output rc=0
+    valid_domain "$domain" || return 1
+    output=$(mktemp) || return 1
+    msg "检查 Reality 目标 ${domain} 的 TLS 1.3、证书和 HTTP/2…"
+    timeout 15 openssl s_client -connect "$domain:443" -servername "$domain" \
+        -tls1_3 -alpn h2 -verify_hostname "$domain" -verify_return_error \
+        </dev/null > "$output" 2>&1 || rc=$?
+    if [[ $rc != 0 ]] || ! grep -q 'TLSv1.3' "$output" ||
+       ! grep -q 'ALPN protocol: h2$' "$output" || ! grep -q 'Verify return code: 0 (ok)' "$output"; then
+        rm -f "$output"
+        err '目标检测失败，请重新部署并选择另一个目标，或检查本机 DNS / 网络 / 系统时间。'
+        return 1
+    fi
+    rm -f "$output"
+}
 # All mutation menu paths execute under with_lock.
 node_add() {
     local self=$1 type name host port sni bbr=keep mode=none email='' webroot='' cert='' key='' candidate node id uuid private public short password pair tmp
@@ -10,7 +35,7 @@ node_add() {
     ask '端口：10000–50000，回车随机' random || return 0; port=$REPLY
     if [[ $port != random ]]; then valid_port "$port" || { err '端口必须在 10000–50000。'; return 1; }; fi
     if [[ $type == vless ]]; then
-        ask 'Reality 握手目标域名' www.microsoft.com || return 0; sni=$REPLY
+        reality_target_select || return 0; sni=$REPLY
     else
         ask '证书域名' "$host" || return 0; sni=$REPLY
         msg 'Lets Encrypt 免费证书：1.自动验证（使用空闲 80 或 443） 2.现有网站目录验证（网站保持运行） 3.导入已有证书'
@@ -38,13 +63,7 @@ node_add() {
     if [[ $port == random ]]; then port=$(choose_port) || return 1; else port_free "$port" || { err '端口被占用，原服务未改动。'; return 1; }; fi
     id=$(random_hex 8) || return 1
     if [[ $type == vless ]]; then
-        local handshake_file
-        handshake_file=$(mktemp) || return 1
-        msg '检查 Reality 目标 TLS 1.3 握手…'
-        timeout 12 openssl s_client -connect "$sni:443" -servername "$sni" -tls1_3 </dev/null > "$handshake_file" 2>&1
-        local handshake_rc=$?
-        if [[ $handshake_rc != 0 ]] || ! grep -q 'TLSv1.3' "$handshake_file"; then rm -f "$handshake_file"; err '目标 TLS 1.3 握手失败，请换域名。'; return 1; fi
-        rm -f "$handshake_file"
+        reality_target_check "$sni" || return 1
         pair=$("$CORE" generate reality-keypair) || return 1
         private=$(printf '%s\n' "$pair" | awk '/PrivateKey:/{print $2}')
         public=$(printf '%s\n' "$pair" | awk '/PublicKey:/{print $2}')
