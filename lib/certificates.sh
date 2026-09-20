@@ -131,13 +131,27 @@ renew_certificates() {
     local domain rc failures=0
     while IFS= read -r domain; do
         [[ $(certificate_source "$domain") == acme ]] || continue
+        # Record a verified legacy association before acme.sh replaces its export.
+        # Otherwise a failed activation makes the still-active old cert look imported.
+        if ! certificate_preserve_source "$domain"; then failures=$((failures+1)); continue; fi
         rc=0
         firewall_renew "$domain" > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
         if [[ $rc == 0 || $rc == 2 ]]; then
-            copy_acme_cert "$domain" || failures=$((failures+1))
+            if ! copy_acme_cert "$domain"; then
+                err "新证书未能应用：${domain}；保留当前证书，下次续期检查会重试应用。"
+                failures=$((failures+1))
+            fi
         else err "证书续期失败：${domain}；保留原证书。日志：$DODO_ROOT/acme-accounts/$domain/renew.log"; failures=$((failures+1)); fi
     done < <(jq -r '.nodes[]|select(.type!="vless")|.sni' "$STATE" | sort -u)
     [[ $failures == 0 ]]
+}
+certificate_preserve_source() {
+    local domain=$1 active=$DATA/certs/$1/active tmp
+    [[ ! -f $active/renewal-source ]] || return 0
+    [[ $(certificate_source "$domain") == acme ]] || return 1
+    tmp=$(mktemp "$active/.renewal-source.XXXXXXXX") || return 1
+    if printf 'acme\n' > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$active/renewal-source"; then return 0; fi
+    rm -f "$tmp"; return 1
 }
 certificate_source() {
     local domain=$1 active=$DATA/certs/$1/active account=$DODO_ROOT/acme-accounts/$1 value

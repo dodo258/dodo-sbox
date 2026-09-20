@@ -32,11 +32,11 @@ dodo-sbox
 
 - **三种协议**：VLESS Reality、AnyTLS + TLS、Hysteria2。
 - **Reality 双选项**：携程 `www.ctrip.com` / 西瓜视频 `www.ixigua.com`，部署前自动检查目标可用性。
-- **节点管理**：按序号查看节点、启停、改名、改端口、重置凭据、删除。
+- **节点管理**：按序号查看节点、启停、改名、改端口、重置凭据、删除；Reality 目标可直接切换，无需重建节点。
 - **原始链接和二维码**：导出 `vless://`、`anytls://`、`hysteria2://`；二维码本地生成，方便配合自己的客户端配置使用。
 - **免费证书**：部署时申请 Let's Encrypt，自动检查续期，无需 Cloudflare API。
 - **证书管理**：首页菜单 **8** 查看域名、到期时间、续期任务状态，也可立即检查续期。
-- **流媒体分流**：选定平台使用解锁 DNS 或 SOCKS5 出口，其他访问保持服务器本机出口。
+- **流媒体分流**：选定平台使用解锁 DNS 或 SOCKS5 出口，其他访问保持服务器本机出口；新增规则自动检查两种方式的域名重叠。
 - **端口选择**：10000–50000，可指定或随机，避开已占用端口。
 - **端口自动放行**：自动配置正在使用的 UFW / firewalld，按协议只开放节点需要的 TCP 或 UDP；改端口、停用、删除时同步清理脚本自己的规则。
 - **更新与回滚**：一键更新脚本和已验证核心，可开启每日自动更新；核心启动失败恢复旧核心。
@@ -83,4 +83,4 @@ dodo-sbox
 
 [详细说明](docs/ADVANCED.md) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/dodo258/dodo-sbox/issues)
 
-参考 [233boy/sing-box](https://github.com/233boy/sing-box)、[mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent)、[yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg) 的交互和管理思路。协议核心来自 [sing-box](https://github.com/SagerNet/sing-box)，证书签发使用 [acme.sh](https://github.com/acmesh-official/acme.sh) 与 Let's Encrypt。许可：[AGPL-3.0](LICENSE)。
+参考 [233boy/sing-box](https://github.com/233boy/sing-box)、[mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent)、[yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg) 的节点管理、证书生命周期和分流实现，具体取舍见 [源码对照记录](docs/SOURCE_REVIEW.md)。协议核心来自 [sing-box](https://github.com/SagerNet/sing-box)，证书签发使用 [acme.sh](https://github.com/acmesh-official/acme.sh) 与 Let's Encrypt。许可：[AGPL-3.0](LICENSE)。

@@ -72,6 +72,20 @@ renew_rc=1
 ! renew_certificates 2>/dev/null
 [[ $(wc -l < "$work/copy-called" | tr -d ' ') == 1 ]]
 echo 'PASS legacy ACME recognition, imported-certificate exclusion and failed renewal preservation'
+# An older ACME cert has no marker. Renewal updates the export before activation;
+# if activation fails, the old active cert must remain eligible for retry.
+mv "$DATA/certs/test.example.com/active/renewal-source" "$work/previous-source"
+renew_rc=0
+firewall_renew() { printf 'new issued certificate fixture\n' > "$account/export/fullchain.pem"; }
+copy_acme_cert() { return 1; }
+before_cert=$(sha256 "$DATA/certs/test.example.com/active/fullchain.pem")
+! renew_certificates 2>/dev/null
+[[ $(certificate_source test.example.com) == acme ]]
+[[ $(sha256 "$DATA/certs/test.example.com/active/fullchain.pem") == "$before_cert" ]]
+copy_acme_cert() { printf 'retried\n' > "$work/activation-retried"; }
+renew_certificates
+[[ -f $work/activation-retried ]]
+echo 'PASS failed activation after legacy renewal remains eligible for the next retry'
 mv "$DATA/certs/test.example.com/active/fullchain.pem" "$work/saved.pem"
 certificate_status > "$work/status"
 grep -q '证书缺失或无法读取' "$work/status"

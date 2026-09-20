@@ -128,6 +128,16 @@ node_change() {
         port_free "$value" "$id" || { rm -f "$tmp" "$candidate"; err '端口无效或被占用。'; return 1; }
         jq --arg id "$id" --argjson p "$value" '(.nodes[]|select(.id==$id)|.port)=$p' "$candidate" > "$tmp";;
       name) jq --arg id "$id" --arg name "$value" '(.nodes[]|select(.id==$id)|.name)=$name' "$candidate" > "$tmp";;
+      reality)
+        if [[ $(printf '%s' "$node" | jq -r .type) != vless ]]; then
+            rm -f "$tmp" "$candidate"; err '只有 Reality 节点可以切换握手目标。'; return 1
+        fi
+        case $value in www.ctrip.com|www.ixigua.com) ;; *) rm -f "$tmp" "$candidate"; err '请选择携程或西瓜视频。'; return 1;; esac
+        if [[ $(printf '%s' "$node" | jq -r .sni) == "$value" ]]; then
+            rm -f "$tmp" "$candidate"; msg '当前已经使用此目标，无需修改。'; return 0
+        fi
+        reality_target_check "$value" || { rm -f "$tmp" "$candidate"; return 1; }
+        jq --arg id "$id" --arg sni "$value" '(.nodes[]|select(.id==$id)|.sni)=$sni' "$candidate" > "$tmp";;
       rotate)
         type=$(printf '%s' "$node" | jq -r .type)
         if [[ $type == vless ]]; then
@@ -159,8 +169,9 @@ node_menu() {
     if [[ $REPLY =~ ^[1-9][0-9]{0,5}$ ]] && (( REPLY <= count )); then
         id=$(jq -r --argjson i "$((REPLY-1))" '.nodes[$i].id' "$STATE") || return 1
     fi
-    node_json "$STATE" "$id" >/dev/null || { err '节点不存在。'; return 1; }
+    type=$(node_json "$STATE" "$id" | jq -r .type) || { err '节点不存在。'; return 1; }
     msg $'1.详情 2.原始分享链接 3.二维码\n4.启用/停用 5.修改端口 6.重置凭据 7.修改名称 8.删除'
+    [[ $type != vless ]] || msg '9.切换 Reality 目标（携程 / 西瓜视频）'
     ask '操作' 1 || return 0
     case $REPLY in
       1) export_node "$id" details;; 2) export_node "$id" uri;; 3) export_node "$id" qr;;
@@ -169,6 +180,13 @@ node_menu() {
       6) yesno '旧凭据会失效，确认重置' && with_lock node_change "$id" rotate;;
       7) ask '新名称' || return 0; with_lock node_change "$id" name "$REPLY";;
       8) yesno '确认删除此节点' && with_lock node_change "$id" delete;;
+      9)
+        [[ $type == vless ]] || { err '仅适用于 Reality 节点。'; return 1; }
+        reality_target_select || return 0
+        msg '切换后需更新客户端的原始链接 / SNI；端口和凭据保持不变，应用时可能短暂中断本脚本节点。'
+        if with_lock node_change "$id" reality "$REPLY"; then
+            msg '当前节点原始链接：'; export_node "$id" uri
+        fi;;
       *) err '无效选项。';;
     esac
 }

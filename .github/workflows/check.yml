@@ -32,6 +32,7 @@ jobs:
           bash tests/updates.sh
           bash tests/firewall.sh
           bash tests/certificates-menu.sh
+          bash tests/management.sh
       - name: Verify real UFW in isolated network and mount namespaces
         run: |
           sudo apt-get install -y --no-install-recommends ufw

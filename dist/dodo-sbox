@@ -2,7 +2,7 @@
 # DODO_SBOX_BUNDLE
 set -o pipefail
 DODO_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
-DODO_VERSION=0.4.0
+DODO_VERSION=0.5.0
 CORE_VERSION=1.14.1
 DODO_ROOT=/opt/dodo-sbox
 DATA=/var/lib/dodo-sbox
@@ -706,13 +706,27 @@ renew_certificates() {
     local domain rc failures=0
     while IFS= read -r domain; do
         [[ $(certificate_source "$domain") == acme ]] || continue
+        # Record a verified legacy association before acme.sh replaces its export.
+        # Otherwise a failed activation makes the still-active old cert look imported.
+        if ! certificate_preserve_source "$domain"; then failures=$((failures+1)); continue; fi
         rc=0
         firewall_renew "$domain" > "$DODO_ROOT/acme-accounts/$domain/renew.log" 2>&1 || rc=$?
         if [[ $rc == 0 || $rc == 2 ]]; then
-            copy_acme_cert "$domain" || failures=$((failures+1))
+            if ! copy_acme_cert "$domain"; then
+                err "新证书未能应用：${domain}；保留当前证书，下次续期检查会重试应用。"
+                failures=$((failures+1))
+            fi
         else err "证书续期失败：${domain}；保留原证书。日志：$DODO_ROOT/acme-accounts/$domain/renew.log"; failures=$((failures+1)); fi
     done < <(jq -r '.nodes[]|select(.type!="vless")|.sni' "$STATE" | sort -u)
     [[ $failures == 0 ]]
+}
+certificate_preserve_source() {
+    local domain=$1 active=$DATA/certs/$1/active tmp
+    [[ ! -f $active/renewal-source ]] || return 0
+    [[ $(certificate_source "$domain") == acme ]] || return 1
+    tmp=$(mktemp "$active/.renewal-source.XXXXXXXX") || return 1
+    if printf 'acme\n' > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$active/renewal-source"; then return 0; fi
+    rm -f "$tmp"; return 1
 }
 certificate_source() {
     local domain=$1 active=$DATA/certs/$1/active account=$DODO_ROOT/acme-accounts/$1 value
@@ -904,6 +918,16 @@ node_change() {
         port_free "$value" "$id" || { rm -f "$tmp" "$candidate"; err '端口无效或被占用。'; return 1; }
         jq --arg id "$id" --argjson p "$value" '(.nodes[]|select(.id==$id)|.port)=$p' "$candidate" > "$tmp";;
       name) jq --arg id "$id" --arg name "$value" '(.nodes[]|select(.id==$id)|.name)=$name' "$candidate" > "$tmp";;
+      reality)
+        if [[ $(printf '%s' "$node" | jq -r .type) != vless ]]; then
+            rm -f "$tmp" "$candidate"; err '只有 Reality 节点可以切换握手目标。'; return 1
+        fi
+        case $value in www.ctrip.com|www.ixigua.com) ;; *) rm -f "$tmp" "$candidate"; err '请选择携程或西瓜视频。'; return 1;; esac
+        if [[ $(printf '%s' "$node" | jq -r .sni) == "$value" ]]; then
+            rm -f "$tmp" "$candidate"; msg '当前已经使用此目标，无需修改。'; return 0
+        fi
+        reality_target_check "$value" || { rm -f "$tmp" "$candidate"; return 1; }
+        jq --arg id "$id" --arg sni "$value" '(.nodes[]|select(.id==$id)|.sni)=$sni' "$candidate" > "$tmp";;
       rotate)
         type=$(printf '%s' "$node" | jq -r .type)
         if [[ $type == vless ]]; then
@@ -935,8 +959,9 @@ node_menu() {
     if [[ $REPLY =~ ^[1-9][0-9]{0,5}$ ]] && (( REPLY <= count )); then
         id=$(jq -r --argjson i "$((REPLY-1))" '.nodes[$i].id' "$STATE") || return 1
     fi
-    node_json "$STATE" "$id" >/dev/null || { err '节点不存在。'; return 1; }
+    type=$(node_json "$STATE" "$id" | jq -r .type) || { err '节点不存在。'; return 1; }
     msg $'1.详情 2.原始分享链接 3.二维码\n4.启用/停用 5.修改端口 6.重置凭据 7.修改名称 8.删除'
+    [[ $type != vless ]] || msg '9.切换 Reality 目标（携程 / 西瓜视频）'
     ask '操作' 1 || return 0
     case $REPLY in
       1) export_node "$id" details;; 2) export_node "$id" uri;; 3) export_node "$id" qr;;
@@ -945,6 +970,13 @@ node_menu() {
       6) yesno '旧凭据会失效，确认重置' && with_lock node_change "$id" rotate;;
       7) ask '新名称' || return 0; with_lock node_change "$id" name "$REPLY";;
       8) yesno '确认删除此节点' && with_lock node_change "$id" delete;;
+      9)
+        [[ $type == vless ]] || { err '仅适用于 Reality 节点。'; return 1; }
+        reality_target_select || return 0
+        msg '切换后需更新客户端的原始链接 / SNI；端口和凭据保持不变，应用时可能短暂中断本脚本节点。'
+        if with_lock node_change "$id" reality "$REPLY"; then
+            msg '当前节点原始链接：'; export_node "$id" uri
+        fi;;
       *) err '无效选项。';;
     esac
 }
@@ -957,13 +989,38 @@ platform_domains() {
       *) return 1;;
     esac
 }
+routing_conflicts() {
+    # Compare opposite modes only; same-mode rules share the same resolver/outbound.
+    # A suffix includes itself and its subdomains, but not lookalike hostnames.
+    jq -r --arg name "${2:-}" '
+      .policies as $p |
+      range(0; $p|length) as $i | range($i+1; $p|length) as $j |
+      $p[$i] as $a | $p[$j] as $b |
+      select($a.mode != $b.mode and ($name == "" or $a.name == $name or $b.name == $name)) |
+      $a.domains[] as $x | $b.domains[] as $y |
+      select($x == $y or ($x|endswith("."+$y)) or ($y|endswith("."+$x))) |
+      "\($a.name) [\($a.mode)] \($x) ↔ \($b.name) [\($b.mode)] \($y)"
+    ' "$1"
+}
+routing_check_conflicts() {
+    local conflicts
+    conflicts=$(routing_conflicts "$1" "${2:-}") || return 1
+    [[ -n $conflicts ]] || return 0
+    err 'DNS 解锁与代理出口的域名范围重叠，请先修改或删除冲突规则：'
+    printf '%s\n' "$conflicts" >&2
+    return 1
+}
 routing_menu() {
     [[ -f $STATE ]] || { err '请先部署节点。'; return 1; }
     msg '解锁 DNS 需要客户端把域名或 DNS 查询交给本服务器；仅发送已解析 IP 时，SNI 嗅探不会自动重写该 IP。指定代理出口可按可识别的域名分流。'
     msg '流媒体分流：1.查看 2.设置解锁 DNS 3.设置代理出口（SOCKS5） 4.添加/替换平台规则 5.删除平台规则'
     ask '操作' 1 || return 0
     local op=$REPLY candidate tmp host port user pass name mode domains input
-    if [[ $op == 1 ]]; then jq '{unlock_dns,egress:(if .egress then (.egress|del(.password)) else null end),policies}' "$STATE"; return 0; fi
+    if [[ $op == 1 ]]; then
+        jq '{unlock_dns,egress:(if .egress then (.egress|del(.password)) else null end),policies}' "$STATE" || return 1
+        if ! routing_check_conflicts "$STATE"; then msg '已有规则保持原状，重叠部分按当前配置由代理规则优先处理。'; fi
+        return 0
+    fi
     candidate=$(new_candidate) || return 1
     tmp=$(mktemp) || return 1
     case $op in
@@ -986,7 +1043,8 @@ routing_menu() {
         ask '匹配域名后缀，空格分隔（会显示完整范围）' "$domains" || { rm -f "$tmp" "$candidate"; return 0; }; input=$REPLY
         ask '方式：dns 或 proxy' dns || { rm -f "$tmp" "$candidate"; return 0; }; mode=$REPLY
         domains=$(printf '%s' "$input" | jq -Rc 'split(" ")|map(select(length>0)|ascii_downcase)|unique') || return 1
-        jq --arg name "$name" --arg mode "$mode" --argjson domains "$domains" '.policies=(.policies|map(select(.name!=$name)))+[{name:$name,mode:$mode,domains:$domains}]' "$candidate" > "$tmp";;
+        jq --arg name "$name" --arg mode "$mode" --argjson domains "$domains" '.policies=(.policies|map(select(.name!=$name)))+[{name:$name,mode:$mode,domains:$domains}]' "$candidate" > "$tmp" || { rm -f "$tmp" "$candidate"; return 1; }
+        routing_check_conflicts "$tmp" "$name" || { rm -f "$tmp" "$candidate"; return 1; };;
       5)
         ask '要删除的规则名称' || { rm -f "$tmp" "$candidate"; return 0; }; name=$REPLY
         jq --arg name "$name" '.policies|=map(select(.name!=$name))' "$candidate" > "$tmp";;
