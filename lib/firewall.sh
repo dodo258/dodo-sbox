@@ -31,6 +31,8 @@ firewall_add() {
             [[ ! -L $profile ]] && firewall_profile "$port" "$proto" | cmp -s - "$profile" || { err "UFW 应用文件冲突：$profile"; return 1; }
             [[ -f $file ]] || { err "UFW 应用名已存在：$app"; return 1; }
         else
+            # Record intent first so interrupted profile creation can be cleaned.
+            printf '%s\t%s\t%s\t%s\t%s\n' "$@" > "$file" || return 1
             firewall_profile "$port" "$proto" > "$profile" || return 1
             chmod 644 "$profile" || return 1
         fi
@@ -58,7 +60,8 @@ firewall_remove() {
         if [[ -e $profile || -L $profile ]]; then
             [[ ! -L $profile ]] && firewall_profile "$port" "$proto" | cmp -s - "$profile" || { err "UFW 应用文件已被修改，保留：$profile"; return 1; }
         else
-            err "UFW 应用文件缺失，保留记录以便检查：$app"; return 1
+            # Reconstruct only a missing owned profile; never overwrite edits.
+            firewall_profile "$port" "$proto" > "$profile" && chmod 644 "$profile" || return 1
         fi
         output=$(LC_ALL=C ufw show added) || return 1
         if printf '%s\n' "$output" | grep -Fq "$app"; then

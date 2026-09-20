@@ -63,6 +63,18 @@ firewall_clear
 LC_ALL=C ufw show added > "$work/final.rules"
 cmp "$work/original.rules" "$work/final.rules"
 echo 'PASS cleanup preserves original rules exactly'
+printf 'ufw\tglobal\tboth\t24002\ttcp\n' > "$DATA/firewall/ufw-global-both-24002-tcp"
+firewall_clear
+[[ ! -e /etc/ufw/applications.d/dodo-sbox-24002-tcp ]]
+LC_ALL=C ufw show added > "$work/final.rules"
+cmp "$work/original.rules" "$work/final.rules"
+echo 'PASS interrupted profile creation can be cleaned without touching original rules'
+printf 'foreign file\n' > /etc/ufw/applications.d/dodo-sbox-24003-tcp
+if firewall_add ufw global both 24003 tcp; then echo 'FAIL foreign profile overwritten'; exit 1; fi
+[[ $(cat /etc/ufw/applications.d/dodo-sbox-24003-tcp) == 'foreign file' ]]
+[[ ! -e $DATA/firewall/ufw-global-both-24003-tcp ]]
+rm /etc/ufw/applications.d/dodo-sbox-24003-tcp
+echo 'PASS conflicting application file is preserved'
 ufw --force disable >/dev/null
 [[ $(firewall_detect) == none ]]
 firewall_sync "$STATE"
