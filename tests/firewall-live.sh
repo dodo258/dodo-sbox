@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run only in disposable CI, inside separate network AND mount namespaces.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "Firewall test failed at line $LINENO"; ufw show added || true; iptables-save || true' ERR
 [[ ${GITHUB_ACTIONS:-} == true && $EUID == 0 ]]
 [[ $(readlink /proc/self/ns/net) != "$(readlink /proc/1/ns/net)" ]]
 [[ $(readlink /proc/self/ns/mnt) != "$(readlink /proc/1/ns/mnt)" ]]
@@ -34,7 +35,7 @@ printf '{"nodes":[{"port":23999,"type":"anytls","enabled":true},{"port":24000,"t
 firewall_sync "$STATE"
 ufw show added | grep -q 'dodo-sbox-23999-tcp'
 ufw show added | grep -q 'dodo-sbox-24000-udp'
-iptables-save | grep -q -- '--dport 24000 -j ACCEPT'
+iptables-save | grep -- '--dport 24000 ' | grep -q -- '-j ACCEPT'
 ufw show added | grep -q 'existing application'
 echo 'PASS real UFW TCP/UDP rules coexist with pre-existing allow on same port'
 firewall_sync "$STATE"
