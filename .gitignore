@@ -1,0 +1,10 @@
+# Local research and private machine records are not release material.
+/REBUILD.md
+/.private/
+/.DS_Store
+*.log
+*.pem
+*.key
+.env
+.env.*
+/dist/.bundle.*
